@@ -127,6 +127,11 @@ module MessageBus::Implementation
     @redis_config ||= {}
   end
 
+  def validate_token(&blk)
+    @token_response = blk if blk
+    @token_response
+  end
+
   def site_id_lookup(&blk)
     @site_id_lookup = blk if blk
     @site_id_lookup

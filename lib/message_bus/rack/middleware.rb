@@ -59,6 +59,8 @@ class MessageBus::Rack::Middleware
 
     return @app.call(env) unless env['PATH_INFO'] =~ /^\/message-bus\//
 
+    if @bus.token
+
     # special debug/test route
     if @bus.allow_broadcast? && env['PATH_INFO'] == '/message-bus/broadcast'.freeze
         parsed = Rack::Request.new(env)
@@ -72,6 +74,10 @@ class MessageBus::Rack::Middleware
     end
 
     client_id = env['PATH_INFO'].split("/")[2]
+
+    token_response = @bus.validate_token.call(env) if @bus.validate_token
+    return [401, {"Content-Type" => "application/json"}, [ {code: token_response[1]}.to_json ]] unless token_response[0]
+
     return [404, {}, ["not found"]] unless client_id
 
     user_id = @bus.user_id_lookup.call(env) if @bus.user_id_lookup
