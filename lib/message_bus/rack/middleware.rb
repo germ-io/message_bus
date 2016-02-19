@@ -74,7 +74,11 @@ class MessageBus::Rack::Middleware
     client_id = env['PATH_INFO'].split("/")[2]
     return [404, {}, ["not found"]] unless client_id
 
-    user_id = @bus.user_id_lookup.call(env) if @bus.user_id_lookup
+    user_result = @bus.user_id_lookup.call(env) if @bus.user_id_lookup
+
+    return [401, {"Content-Type" => "application/json"}, [ {code: user_result[1]}.to_json ]] unless user_result[0]
+
+    user_id = user_result[0]
     group_ids = @bus.group_ids_lookup.call(env) if @bus.group_ids_lookup
     site_id = @bus.site_id_lookup.call(env) if @bus.site_id_lookup
 
