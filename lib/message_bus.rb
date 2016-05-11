@@ -7,7 +7,6 @@ require "message_bus/connection_manager"
 require "message_bus/diagnostics"
 require "message_bus/rack/middleware"
 require "message_bus/rack/diagnostics"
-require "message_bus/redis/reliable_pub_sub"
 require "message_bus/timer_thread"
 
 # we still need to take care of the logger
@@ -16,10 +15,13 @@ if defined?(::Rails)
 end
 
 module MessageBus; end
+MessageBus::BACKENDS = {}
 class MessageBus::InvalidMessage < StandardError; end
 class MessageBus::BusDestroyed < StandardError; end
 
 module MessageBus::Implementation
+  # Configuration options hash
+  attr_reader :config
 
   # Like Mutex but safe for recursive calls
   class Synchronizer
@@ -27,87 +29,90 @@ module MessageBus::Implementation
   end
 
   def initialize
+    @config = {}
     @mutex = Synchronizer.new
   end
 
   def cache_assets=(val)
-    @cache_assets = val
+    configure(cache_assets: val)
   end
 
   def cache_assets
-    if defined? @cache_assets
-      @cache_assets
+    if defined? @config[:cache_assets]
+      @config[:cache_assets]
     else
       true
     end
   end
 
   def logger=(logger)
-    @logger = logger
+    configure(logger: logger)
   end
 
   def logger
-    return @logger if @logger
+    return @config[:logger] if @config[:logger]
     require 'logger'
-    @logger = Logger.new(STDOUT)
-    @logger.level = Logger::INFO
-    @logger
+    logger = Logger.new(STDOUT)
+    logger.level = Logger::INFO
+    configure(logger: logger)
+    logger
   end
 
   def chunked_encoding_enabled?
-    @chunked_encoding_enabled == false ? false : true
+    @config[:chunked_encoding_enabled] == false ? false : true
   end
 
   def chunked_encoding_enabled=(val)
-    @chunked_encoding_enabled = val
+    configure(chunked_encoding_enabled: val)
   end
 
   def long_polling_enabled?
-    @long_polling_enabled == false ? false : true
+    @config[:long_polling_enabled] == false ? false : true
   end
 
   def long_polling_enabled=(val)
-    @long_polling_enabled = val
+    configure(long_polling_enabled: val)
   end
 
   # The number of simultanuous clients we can service
   #  will revert to polling if we are out of slots
   def max_active_clients=(val)
-    @max_active_clients = val
+    configure(max_active_clients: val)
   end
 
   def max_active_clients
-    @max_active_clients || 1000
+    @config[:max_active_clients] || 1000
   end
 
   def rack_hijack_enabled?
-    if @rack_hijack_enabled.nil?
-      @rack_hijack_enabled = true
+    if @config[:rack_hijack_enabled].nil?
+      enable = true
 
       # without this switch passenger will explode
       # it will run out of connections after about 10
       if defined? PhusionPassenger
-        @rack_hijack_enabled = false
+        enable = false
         if PhusionPassenger.respond_to? :advertised_concurrency_level
           PhusionPassenger.advertised_concurrency_level = 0
-          @rack_hijack_enabled = true
+          enable = true
         end
       end
+      configure(rack_hijack_enabled: enable)
     end
 
-    @rack_hijack_enabled
+    @config[:rack_hijack_enabled]
   end
 
   def rack_hijack_enabled=(val)
-    @rack_hijack_enabled = val
+    configure(rack_hijack_enabled: val)
   end
 
   def long_polling_interval=(millisecs)
-    @long_polling_interval = millisecs
+    configure(long_polling_interval: millisecs)
   end
 
   def long_polling_interval
-    @long_polling_interval || 25 * 1000
+    @config[:long_polling_interval] || 25 * 1000
   end
 
   def off
@@ -118,56 +123,58 @@ module MessageBus::Implementation
     @off = false
   end
 
+  def configure(config)
+    @config.merge!(config)
+  end
+
   # Allow us to inject a redis db
   def redis_config=(config)
-    @redis_config = config
+    configure(config.merge(:backend=>:redis))
   end
 
-  def redis_config
-    @redis_config ||= {}
-  end
+  alias redis_config config
 
   def site_id_lookup(&blk)
-    @site_id_lookup = blk if blk
-    @site_id_lookup
+    configure(site_id_lookup: blk) if blk
+    @config[:site_id_lookup]
   end
 
   def user_id_lookup(&blk)
-    @user_id_lookup = blk if blk
-    @user_id_lookup
+    configure(user_id_lookup: blk) if blk
+    @config[:user_id_lookup]
   end
 
   def group_ids_lookup(&blk)
-    @group_ids_lookup = blk if blk
-    @group_ids_lookup
+    configure(group_ids_lookup: blk) if blk
+    @config[:group_ids_lookup]
   end
 
   def is_admin_lookup(&blk)
-    @is_admin_lookup = blk if blk
-    @is_admin_lookup
+    configure(is_admin_lookup: blk) if blk
+    @config[:is_admin_lookup]
   end
 
   def extra_response_headers_lookup(&blk)
-    @extra_response_headers_lookup = blk if blk
-    @extra_response_headers_lookup
+    configure(extra_response_headers_lookup: blk) if blk
+    @config[:extra_response_headers_lookup]
   end
 
   def on_connect(&blk)
-    @on_connect = blk if blk
-    @on_connect
+    configure(on_connect: blk) if blk
+    @config[:on_connect]
   end
 
   def on_disconnect(&blk)
-    @on_disconnect = blk if blk
-    @on_disconnect
+    configure(on_disconnect: blk) if blk
+    @config[:on_disconnect]
   end
 
   def allow_broadcast=(val)
-    @allow_broadcast = val
+    configure(allow_broadcast: val)
   end
 
   def allow_broadcast?
-    @allow_broadcast ||=
+    @config[:allow_broadcast] ||=
       if defined? ::Rails
         ::Rails.env.test? || ::Rails.env.development?
       else
@@ -176,14 +183,22 @@ module MessageBus::Implementation
   end
 
   def reliable_pub_sub=(pub_sub)
-    @reliable_pub_sub = pub_sub
+    configure(reliable_pub_sub: pub_sub)
   end
 
   def reliable_pub_sub
     @mutex.synchronize do
       return nil if @destroyed
-      @reliable_pub_sub ||= MessageBus::Redis::ReliablePubSub.new redis_config
+      @config[:reliable_pub_sub] ||= begin
+        @config[:backend_options] ||= {}
+        require "message_bus/backends/#{backend}"
+        MessageBus::BACKENDS[backend].new @config
+      end
     end
+  end
+
+  def backend
+    @config[:backend] || :redis
   end
 
   def enable_diagnostics
@@ -242,8 +257,14 @@ module MessageBus::Implementation
     channel.split(ENCODE_SITE_TOKEN)
   end
 
-  def subscribe(channel=nil, &blk)
-    subscribe_impl(channel, nil, &blk)
+  def subscribe(channel=nil, last_id=-1, &blk)
+    subscribe_impl(channel, nil, last_id, &blk)
+  end
+
+  # subscribe only on current site
+  def local_subscribe(channel=nil, last_id=-1, &blk)
+    site_id = site_id_lookup.call if site_id_lookup && ! global?(channel)
+    subscribe_impl(channel, site_id, last_id, &blk)
   end
 
   def unsubscribe(channel=nil, &blk)
@@ -253,12 +274,6 @@ module MessageBus::Implementation
   def local_unsubscribe(channel=nil, &blk)
     site_id = site_id_lookup.call if site_id_lookup
     unsubscribe_impl(channel, site_id, &blk)
-  end
-
-  # subscribe only on current site
-  def local_subscribe(channel=nil, &blk)
-    site_id = site_id_lookup.call if site_id_lookup && ! global?(channel)
-    subscribe_impl(channel, site_id, &blk)
   end
 
   def global_backlog(last_id=nil)
@@ -333,11 +348,11 @@ module MessageBus::Implementation
   # a keepalive will run every N seconds, if it fails
   # process is killed
   def keepalive_interval=(interval)
-    @keepalive_interval = interval
+    configure(keepalive_interval: interval)
   end
 
   def keepalive_interval
-    @keepalive_interval || 60
+    @config[:keepalive_interval] || 60
   end
 
   protected
@@ -357,9 +372,44 @@ module MessageBus::Implementation
     msg.client_ids = parsed["client_ids"]
   end
 
-  def subscribe_impl(channel, site_id, &blk)
+  def replay_backlog(channel, last_id, site_id)
+    id = nil
+
+    backlog(channel, last_id, site_id).each do |m|
+      yield m
+      id = m.message_id
+    end
+
+    id
+  end
+
+  def subscribe_impl(channel, site_id, last_id, &blk)
 
     raise MessageBus::BusDestroyed if @destroyed
+
+    if last_id >= 0
+      # this gets a bit tricky, but we got to ensure ordering so we wrap the block
+      original_blk = blk
+      current_id = replay_backlog(channel, last_id, site_id, &blk)
+      just_yield = false
+
+      # we double check to ensure no messages snuck through while we were subscribing
+      blk = proc do |m|
+        if just_yield
+          original_blk.call m
+        else
+          if current_id && current_id == (m.message_id-1)
+            original_blk.call m
+            just_yield = true
+          else
+            current_id = replay_backlog(channel, current_id, site_id, &original_blk)
+            if (current_id == m.message_id)
+              just_yield = true
+            end
+          end
+        end
+      end
+    end
 
     @subscriptions ||= {}
     @subscriptions[site_id] ||= {}
@@ -458,7 +508,9 @@ module MessageBus::Implementation
         globals, locals, local_globals, global_globals = nil
 
         @mutex.synchronize do
-          raise MessageBus::BusDestroyed if @destroyed
+          return if @destroyed
+          next unless @subscriptions
+
           globals = @subscriptions[nil]
           locals = @subscriptions[msg.site_id] if msg.site_id
 

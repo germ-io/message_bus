@@ -1,34 +1,29 @@
+$: << File.dirname(__FILE__)
+$: << File.join(File.dirname(__FILE__), '..', 'lib')
 require 'thin'
 require 'lib/fake_async_middleware'
+require 'message_bus'
 
-RSpec.configure do |config|
-  config.expect_with :rspec do |c|
-    c.syntax = [:should, :expect]
-  end
-  config.mock_with :rspec do |mocks|
-    mocks.syntax = :should
-  end
+require 'minitest/autorun'
+require 'minitest/spec'
 
-  # to debug hanging tests
-  # config.before :each do |x|
-  #   $start = Time.now
-  #   puts "Start: #{x.metadata[:location]}"
-  # end
-  #
-  # config.after :each do |x|
-  #   puts "#{x.metadata[:location]} #{Time.now - $start}"
-  # end
+backend = (ENV['MESSAGE_BUS_BACKEND'] || :redis).to_sym
+MESSAGE_BUS_CONFIG = {:backend=>backend}
+require "message_bus/backends/#{backend}"
+PUB_SUB_CLASS = MessageBus::BACKENDS.fetch(backend)
+if backend == :postgres
+  MESSAGE_BUS_CONFIG.merge!(:backend_options=>{:user=>ENV['PGUSER'] || ENV['USER'], :dbname=>ENV['PGDATABASE'] || 'message_bus_test'})
 end
+puts "Running with backend: #{backend}"
 
 def wait_for(timeout_milliseconds)
   timeout = (timeout_milliseconds + 0.0) / 1000
   finish = Time.now + timeout
-  t = Thread.new do
+
+  Thread.new do
     while Time.now < finish && !yield
       sleep(0.001)
     end
-  end
-  t.join
+  end.join
+
 end
-
-

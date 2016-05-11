@@ -1,3 +1,5 @@
+require 'json'
+
 # our little message bus, accepts long polling and polling
 module MessageBus::Rack; end
 
@@ -88,12 +90,23 @@ class MessageBus::Rack::Middleware
     client = MessageBus::Client.new(message_bus: @bus, client_id: client_id,
                                     user_id: user_id, site_id: site_id, group_ids: group_ids)
 
-    request = Rack::Request.new(env)
-    request.POST.each do |k,v|
-      if k == "__seq".freeze
-        client.seq = v.to_i
-      else
+    if channels = env['message_bus.channels']
+      if seq = env['message_bus.seq']
+        client.seq = seq.to_i
+      end
+      channels.each do |k, v|
         client.subscribe(k, v)
+      end
+    else
+      request = Rack::Request.new(env)
+      is_json = request.content_type && request.content_type.include?('application/json')
+      data = is_json ? JSON.parse(request.body.read) : request.POST
+      data.each do |k,v|
+        if k == "__seq".freeze
+          client.seq = v.to_i
+        else
+          client.subscribe(k, v)
+        end
       end
     end
 
@@ -198,4 +211,3 @@ class MessageBus::Rack::Middleware
     }
   end
 end
-

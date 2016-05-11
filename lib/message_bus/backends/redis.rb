@@ -10,9 +10,7 @@ require 'redis'
 module MessageBus::Redis; end
 class MessageBus::Redis::ReliablePubSub
   attr_reader :subscribed
-  attr_accessor :max_publish_retries, :max_publish_wait, :max_backlog_size,
-                :max_global_backlog_size, :max_in_memory_publish_backlog,
-                :max_backlog_age
+  attr_accessor :max_backlog_size, :max_global_backlog_size, :max_in_memory_publish_backlog, :max_backlog_age
 
   UNSUB_MESSAGE = "$$UNSUBSCRIBE"
 
@@ -27,11 +25,12 @@ class MessageBus::Redis::ReliablePubSub
 
   # max_backlog_size is per multiplexed channel
   def initialize(redis_config = {}, max_backlog_size = 1000)
-    @redis_config = redis_config
+    @redis_config = redis_config.dup
+    unless @redis_config[:enable_redis_logger]
+      @redis_config[:logger] = nil
+    end
     @max_backlog_size = max_backlog_size
     @max_global_backlog_size = 2000
-    @max_publish_retries = 10
-    @max_publish_wait = 500 #ms
     @max_in_memory_publish_backlog = 1000
     @in_memory_backlog = []
     @lock = Mutex.new
@@ -148,11 +147,21 @@ class MessageBus::Redis::ReliablePubSub
   end
 
   def ensure_backlog_flushed
-    while true
+    flushed = false
+
+    while !flushed
       try_again = false
 
+      if is_readonly?
+        sleep 1
+        next
+      end
+
       @lock.synchronize do
-        break if @in_memory_backlog.length == 0
+        if @in_memory_backlog.length == 0
+          flushed = true
+          break
+        end
 
         begin
           publish(*@in_memory_backlog[0],false)
@@ -167,13 +176,6 @@ class MessageBus::Redis::ReliablePubSub
         end
 
         @in_memory_backlog.delete_at(0) unless try_again
-      end
-
-      if try_again
-        sleep 0.005
-        # in case we are not connected to the correct server
-        # which can happen when sharing ips
-        pub_redis.client.reconnect
       end
     end
   ensure
@@ -339,4 +341,21 @@ class MessageBus::Redis::ReliablePubSub
     end
   end
 
+  private
+
+  def is_readonly?
+    key = "__mb_is_readonly".freeze
+
+    begin
+      # in case we are not connected to the correct server
+      # which can happen when sharing ips
+      pub_redis.client.reconnect
+      pub_redis.client.call([:set, key, '1'])
+      false
+    rescue Redis::CommandError => e
+      return true if e.message =~ /^READONLY/
+    end
+  end
+
+  MessageBus::BACKENDS[:redis] = self
 end

@@ -1,6 +1,6 @@
 # MessageBus
 
-A reliable, robust messaging bus for Ruby processes and web clients built on Redis.
+A reliable, robust messaging bus for Ruby processes and web clients.
 
 MessageBus implements a Server to Server channel based protocol and Server to Web Client protocol (using polling, long-polling or long-polling + streaming)
 
@@ -17,6 +17,10 @@ Live chat demo per [examples/chat](https://github.com/SamSaffron/message_bus/tre
 ## Can you handle concurrent requests?
 
 **Yes**, MessageBus uses Rack Hijack, this interface allows us to take control of the underlying socket. MessageBus can handle thousands of concurrent long polls on all popular Ruby webservers. MessageBus runs as middleware in your Rack (or by extension Rails) application and does not require a dedicated server. Background work is minimized to ensure it does not interfere with existing non MessageBus traffic.
+
+## Is this used in production at scale?
+
+**Yes**, MessageBus was extracted out of [Discourse](http://www.discourse.org/) and is used in thousands of production Discourse sites at scale.
 
 ## Installation
 
@@ -45,6 +49,16 @@ MessageBus.subscribe "/channel" do |msg|
   # block called in a background thread when message is received
 end
 
+# subscribe to channel and receive the entire backlog
+MessageBus.subscribe "/channel", 0 do |msg|
+  # block called in a background thread when message is received
+end
+
+# subscribe to channel and receive the backlog starting at message 6
+MessageBus.subscribe "/channel", 5 do |msg|
+  # block called in a background thread when message is received
+end
+
 MessageBus.backlog "/channel", id
 # returns all messages after the id
 
@@ -56,14 +70,18 @@ MessageBus.publish "/channel", "hello", client_ids: ["XXX","YYY"]
 
 # message bus determines the user ids and groups based on env
 
-MessageBus.user_id_lookup do |env|
+MessageBus.configure(user_id_lookup: proc do |env|
+  # this lookup occurs on JS-client poolings, so that server can retrieve backlog 
+  # for the client considering/matching/filtering user_ids set on published messages
+  # if user_id is not set on publish time, any user_id returned here will receive the message
+  
   # return the user id here
-end
+end)
 
-MessageBus.group_ids_lookup do |env|
+MessageBus.configure(group_ids_lookup: proc do |env|
   # return the group ids the user belongs to
   # can be nil or []
-end
+end)
 ```
 
 ### Transport
@@ -100,7 +118,7 @@ MessageBus.enableChunkedEncoding = false; // in your JavaScript
 Or
 
 ```
-MessageBus.chunked_encoding_enabled = false // in Ruby
+MessageBus.configure(chunked_encoding_enabled: false) // in Ruby
 ```
 
 Long Polling requires no special setup, as soon as new data arrives on the channel the server delivers the data and closes the connection.
@@ -113,9 +131,9 @@ MessageBus can be used in an environment that hosts multiple sites by multiplexi
 
 ```ruby
 # define a site_id lookup method
-MessageBus.site_id_lookup do
+MessageBus.configure(site_id_lookup: proc do
   some_method_that_returns_site_id_string
-end
+end)
 
 # you may post messages just to this site
 MessageBus.publish "/channel", "some message"
@@ -137,6 +155,11 @@ JavaScript can listen on any channel (and receive notification via polling or lo
 ```
 Note, the message-bus.js file is located in the assets folder.
 
+**Rails**
+```javascript
+//= require message-bus
+```
+
 ```javascript
 MessageBus.start(); // call once at startup
 
@@ -148,12 +171,16 @@ MessageBus.subscribe("/channel", function(data){
 
 ```
 
+There is also a Ruby implementation of the client library, at
+[message_bus-client](https://github.com/lowjoel/message_bus-client) with the API very similar to
+that of the JavaScript client.
+
 **Client settings**:
 
 
 All client settings are settable via `MessageBus.OPTION`
 
-Setting|Default|
+Setting|Default|Info
 ----|---|---|
 enableLongPolling|true|Allow long-polling (provided it is enable by the server)
 callbackInterval|15000|Safeguard to ensure background polling does not exceed this interval (in milliseconds)
@@ -161,8 +188,8 @@ backgroundCallbackInterval|60000|Interval to poll when long polling is disabled 
 maxPollInterval|180000|If request to the server start failing, MessageBus will backoff, this is the upper limit of the backoff.
 alwaysLongPoll|false|For debugging you may want to disable the "is browser in background" check and always long-poll
 baseUrl|/|If message bus is mounted in a subdirectory of different domain, you may configure it to perform requests there
-ajax|$.ajax|The only dependency on jQuery, you may set up a custom ajax function here
-
+ajax|$.ajax or XMLHttpRequest|MessageBus will first attempt to use jQuery and then fallback to a plain XMLHttpRequest version that's contained in the `messsage-bus-ajax.js` file. `messsage-bus-ajax.js` must be loaded after `messsage-bus.js` for it to be used.
+headers|{}|Extra headers to be include with request.  Properties and values of object must be valid values for HTTP Headers, i.e. no spaces and control characters.
 **API**:
 
 `MessageBus.diagnostics()` : Returns a log that may be used for diagnostics on the status of message bus
@@ -179,6 +206,15 @@ ajax|$.ajax|The only dependency on jQuery, you may set up a custom ajax function
 
 `MessageBus.unsubscribe(channel,func)` : Unsubscribe callback from a particular channel
 
+`MessageBus.noConflict()` : Removes MessageBus from the global namespace by replacing it with whatever was present before MessageBus was loaded.  Returns a reference to the MessageBus object.
+
+## Running tests
+
+To run tests you need both Postgres and Redis installed. By default we will connect to the database `message_bus_test` with the current username. If you wish to override this:
+
+```
+PGUSER=some_user PGDATABASE=some_db bundle exec rake
+```
 
 
 ## Configuration
@@ -188,13 +224,35 @@ ajax|$.ajax|The only dependency on jQuery, you may set up a custom ajax function
 You can configure redis setting in `config/initializers/message_bus.rb`, like
 
 ```ruby
-MessageBus.redis_config = { url: "redis://:p4ssw0rd@10.0.1.1:6380/15" }
+MessageBus.configure(backend: :redis, url: "redis://:p4ssw0rd@10.0.1.1:6380/15")
 ```
 The redis client message_bus uses is [redis-rb](https://github.com/redis/redis-rb), so you can visit it's repo to see what options you can configure.
 
+### PostgreSQL
+
+message_bus also supports PostgreSQL as the backend:
+
+```ruby
+MessageBus.configure(backend: :postgres, backend_options: {user: 'message_bus', dbname: 'message_bus'})
+```
+
+The PostgreSQL client message_bus uses is [ruby-pg](https://bitbucket.org/ged/ruby-pg), so you can visit it's repo to see what options you can configure inside `:backend_options`.
+
+A `:clear_every` option is also supported, which only clears the backlogs on every number of requests given.  So if you set `clear_every: 100`, the backlog will only be cleared every 100 requests.  This can improve performance in cases where exact backlog clearing are not required.
+
+### Memory
+
+message_bus also supports an in-memory backend.  This can be used for testing or simple single-process environments that do not require persistence.
+
+```ruby
+MessageBus.configure(backend: :memory)
+```
+
+The `:clear_every` option supported by the PostgreSQL backend is also supported by the in-memory backend.
+
 ### Forking/threading app servers
 
-If you're using a forking or threading app server and you're not getting immediate updates from published messages, you might need to reconnect Redis in your app server config:
+If you're using a forking or threading app server and you're not getting immediate updates from published messages, you might need to reconnect Redis/PostgreSQL in your app server config:
 
 #### Passenger
 ```ruby
@@ -210,6 +268,23 @@ if defined?(PhusionPassenger)
   end
 end
 ```
+
+MessageBus uses long polling which needs to be configured in Passenger
+
+* for passenger version < 5.0.21
+
+`PhusionPassenger.advertised_concurrency_level = 0` to application.rb
+
+* for passenger version > 5.0.21
+
+```
+   location /message-bus {
+       passenger_app_group_name foo_websocket;
+       passenger_force_max_concurrent_requests_per_process 0;
+   }
+```
+to nginx.conf.
+For more information see [Passenger documentation](https://www.phusionpassenger.com/library/config/nginx/tuning_sse_and_websockets/)
 
 #### Puma
 ```ruby
@@ -229,14 +304,14 @@ after_fork do |server, worker|
 end
 ```
 
+###
+
 ## Want to help?
 
 If you are looking to contribute to this project here are some ideas
 
-- Build an in-memory storage backend to ease testing and for very simple deployments
-- Build a PostgreSQL backend using NOTIFY and LISTEN
-- Improve general documentation
-- Port the test suite to MiniTest
+- Add a test suite for JavaScript message-bus.js
+- Build backends for other providers (zeromq, rabbitmq, disque)
+- Improve and properly document admin dashboard (add opt-in stats, better diagnostics into queues)
+- Improve general documentation (Add examples, refine existing examples)
 - Make MessageBus a nice website
-
-

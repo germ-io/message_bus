@@ -1,3 +1,57 @@
+11-05-2016
+
+- Version 2.0.0.beta.11
+- Fix: for https://github.com/rubygems/rubygems/issues/1448 which is still broken, build under Ruby 2.0
+
+11-05-2016
+
+- Version 2.0.0.beta.10
+- Fix: for https://github.com/rubygems/rubygems/issues/1448
+
+11-05-2016
+
+- Version 2.0.0.beta.9
+- Fix: requests without content type were erroring out, breaks CORS
+
+27-04-2016
+
+- Version 2.0.0.beta.8
+- Fix: exception raised sometimes when subscribing at a particular position
+
+26-04-2016
+
+- Version 2.0.0.beta.7
+
+- Feature: Support custom HTTP headers without depending on jQuery @nathanstitt
+- Feature: Allow subscribe at a particular position from server side @sam
+
+29-02-2016
+
+- Version 2.0.0.beta.6
+
+- Feature: Support standalone opertion without depending on jQuery @nathanstitt
+- Feature: Support a noconflict mode @nathanstitt
+- Feature: Support JSON POST payload @nathanstitt
+
+29-02-2016
+
+- Version 2.0.0.beta.5
+
+- Fix: JavaScript unsubscribe was not updating publicly visible MessageBus.callbacks @sam
+- Fix: When MessageBus is talking to a readonly redis buffering may cause a infinite loop @tgxworld
+
+- Version 2.0.0.beta.4
+
+- Feature: allow verbose redis logging by specifying `enable_redis_logger` in config, default disabled
+
+- Version 2.0.0.beta.3
+
+- Feature: Postgresql backend @jeremyevans
+- Breaking Change: Configuration API changed see Readme for details @jeremyevans
+- Breaking Change: Remove runtime dependency on Redis @jeremyevans
+- Dev: Convert all specs to minitest @jeremyevans
+- Feature: Support passing channels to Rack middleware via env['message_bus.channels'] via @jeremyevans
+
 03-01-2016
 
 - Version 2.0.0.beta.2

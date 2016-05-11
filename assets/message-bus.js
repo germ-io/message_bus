@@ -1,10 +1,11 @@
 /*jshint bitwise: false*/
-"use strict;"
+(function(global, document, undefined) {
+  'use strict';
+  var previousMessageBus = global.MessageBus;
 
-window.MessageBus = (function() {
   // http://stackoverflow.com/questions/105034/how-to-create-a-guid-uuid-in-javascript
   var callbacks, clientId, failCount, shouldLongPoll, queue, responseCallbacks, uniqueId, baseUrl;
-  var me, started, stopped, longPoller, pollTimeout, paused, later;
+  var me, started, stopped, longPoller, pollTimeout, paused, later, jQuery, interval, chunkedBackoff;
 
   uniqueId = function() {
     return 'xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
@@ -25,9 +26,8 @@ window.MessageBus = (function() {
   paused = false;
   later = [];
   chunkedBackoff = 0;
-
+  jQuery = global.jQuery;
   var hiddenProperty;
-
 
   (function(){
     var prefixes = ["","webkit","ms","moz"];
@@ -123,6 +123,9 @@ window.MessageBus = (function() {
     var headers = {
       'X-SILENCE-LOGGER': 'true'
     };
+    for (var name in me.headers){
+      headers[name] = me.headers[name];
+    }
 
     if (!chunked){
       headers["Dont-Chunk"] = 'true';
@@ -161,38 +164,55 @@ window.MessageBus = (function() {
       }
     };
 
+    var setOnProgressListener = function(xhr) {
+      var position = 0;
+      // if it takes longer than 3000 ms to get first chunk, we have some proxy
+      // this is messing with us, so just backoff from using chunked for now
+      var chunkedTimeout = setTimeout(disableChunked,3000);
+      xhr.onprogress = function () {
+        clearTimeout(chunkedTimeout);
+        if(xhr.getResponseHeader('Content-Type') === 'application/json; charset=utf-8') {
+          // not chunked we are sending json back
+          chunked = false;
+          return;
+        }
+        position = handle_progress(xhr.responseText, position);
+      }
+    };
+    if (!me.ajax){
+      throw new Error("Either jQuery or the ajax adapter must be loaded");
+    }
     var req = me.ajax({
-      url: me.baseUrl + "message-bus/" + me.clientId + "/poll?" + (!longPoll ? "dlp=t" : ""),
+      url: me.baseUrl + "message-bus/" + me.clientId + "/poll" + (!longPoll ? "?dlp=t" : ""),
       data: data,
       cache: false,
       dataType: dataType,
       type: 'POST',
       headers: headers,
+      messageBus: {
+        chunked: chunked,
+        onProgressListener: function(xhr) {
+          var position = 0;
+          // if it takes longer than 3000 ms to get first chunk, we have some proxy
+          // this is messing with us, so just backoff from using chunked for now
+          var chunkedTimeout = setTimeout(disableChunked,3000);
+          return xhr.onprogress = function () {
+            clearTimeout(chunkedTimeout);
+            if(xhr.getResponseHeader('Content-Type') === 'application/json; charset=utf-8') {
+              chunked = false; // not chunked, we are sending json back
+            } else {
+              position = handle_progress(xhr.responseText, position);
+            }
+          }
+        }
+      },
       xhr: function() {
-         var xhr = jQuery.ajaxSettings.xhr();
-
-         if (!chunked) {
-            return xhr;
-         }
-
-         var position = 0;
-
-         // if it takes longer than 3000 ms to get first chunk, we have some proxy
-         // this is messing with us, so just backoff from using chunked for now
-         var chunkedTimeout = setTimeout(disableChunked,3000);
-
-         xhr.onprogress = function () {
-           clearTimeout(chunkedTimeout);
-
-           if(xhr.getResponseHeader('Content-Type') === 'application/json; charset=utf-8') {
-             // not chunked we are sending json back
-             chunked = false;
-             return;
-           }
-           position = handle_progress(xhr.responseText, position);
-         }
-
-         return xhr;
+        var xhr = jQuery.ajaxSettings.xhr();
+        if (!chunked) {
+          return xhr;
+        }
+        this.messageBus.onProgressListener(xhr);
+        return xhr;
       },
       success: function(messages) {
          if (!chunked) {
@@ -257,10 +277,12 @@ window.MessageBus = (function() {
     clientId: clientId,
     alwaysLongPoll: false,
     baseUrl: baseUrl,
-    // TODO we can make the dependency on $ and jQuery conditional
-    // all we really need is an implementation of ajax
-    ajax: ($ && $.ajax),
-
+    headers: {},
+    ajax: (jQuery && jQuery.ajax),
+    noConflict: function(){
+      global.MessageBus = global.MessageBus.previousMessageBus;
+      return this;
+    },
     diagnostics: function(){
       console.log("Stopped: " + stopped + " Started: " + started);
       console.log("Current callbacks");
@@ -317,7 +339,7 @@ window.MessageBus = (function() {
 
       // monitor visibility, issue a new long poll when the page shows
       if(document.addEventListener && 'hidden' in document){
-        me.visibilityEvent = document.addEventListener('visibilitychange', function(){
+        me.visibilityEvent = global.document.addEventListener('visibilitychange', function(){
           if(!document.hidden && !me.longPoll && pollTimeout){
             clearTimeout(pollTimeout);
             pollTimeout = null;
@@ -345,24 +367,28 @@ window.MessageBus = (function() {
         last_id: lastId
       });
       if (me.longPoll) {
-        return me.longPoll.abort();
+        me.longPoll.abort();
       }
+
+      return func;
     },
 
     // Unsubscribe from a channel
     unsubscribe: function(channel, func) {
-      // TODO proper globbing
+      // TODO allow for globbing in the middle of a channel name
+      // like /something/*/something
+      // at the moment we only support globbing /something/*
       var glob;
       if (channel.indexOf("*", channel.length - 1) !== -1) {
         channel = channel.substr(0, channel.length - 1);
         glob = true;
       }
 
-      var filtered = [];
+      var removed = false;
 
-      for (var i=0; i<callbacks.length; i++) {
+      for (var i=callbacks.length-1; i>=0; i--) {
 
-        callback = callbacks[i];
+        var callback = callbacks[i];
         var keep;
 
         if (glob) {
@@ -375,18 +401,18 @@ window.MessageBus = (function() {
           keep = true;
         }
 
-        if (keep) {
-          filtered.push(callback);
+        if (!keep) {
+          callbacks.splice(i,1);
+          removed = true;
         }
       }
 
-      callbacks = filtered;
-
-      if (me.longPoll) {
-        return me.longPoll.abort();
+      if (removed && me.longPoll) {
+        me.longPoll.abort();
       }
+
+      return removed;
     }
   };
-
-  return me;
-})();
+  global.MessageBus = me;
+})(window, document);
