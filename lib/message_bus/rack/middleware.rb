@@ -77,8 +77,13 @@ class MessageBus::Rack::Middleware
     return [404, {}, ["not found"]] unless client_id
 
     user_result = @bus.user_id_lookup.call(env) if @bus.user_id_lookup
-
     return [401, {"Content-Type" => "application/json"}, [ {code: user_result[1]}.to_json ]] unless user_result[0]
+
+    account_result = @bus.account_id_lookup.call(env) if @bus.account_id_lookup
+    return [401, {"Content-Type" => "application/json"}, [ {code: account_result[1]}.to_json ]] unless account_result[0]
+
+    authorized = @bus.authorize_account_and_user.call(account_result[0], user_result[0]) if @bus.authorize_account_and_user
+    return [401, {"Content-Type" => "application/json"}, [ {code: authorized[1]}.to_json ]] unless authorized[0]
 
     user_id = user_result[0]
     group_ids = @bus.group_ids_lookup.call(env) if @bus.group_ids_lookup

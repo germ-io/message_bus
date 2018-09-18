@@ -144,6 +144,16 @@ module MessageBus::Implementation
     @config[:user_id_lookup]
   end
 
+  def account_id_lookup(&blk)
+    configure(account_id_lookup: blk) if blk
+    @config[:account_id_lookup]
+  end
+
+  def authorize_account_and_user(&blk)
+    configure(authorize_account_and_user: blk) if blk
+    @config[:authorize_account_and_user]
+  end
+
   def group_ids_lookup(&blk)
     configure(group_ids_lookup: blk) if blk
     @config[:group_ids_lookup]
